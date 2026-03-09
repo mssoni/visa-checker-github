@@ -5,7 +5,6 @@ Monitors VisaGrader.com for H1B visa slot availability across all 5 Indian citie
 Sends email + desktop notifications when slots are found.
 """
 
-import requests
 import re
 import json
 import smtplib
@@ -13,11 +12,13 @@ import subprocess
 import sys
 import os
 import logging
+import time
 from datetime import datetime, timezone, timedelta
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from bs4 import BeautifulSoup
 from pathlib import Path
+from playwright.sync_api import sync_playwright
 
 # IST timezone (UTC+5:30) — used so the digest fires at the right time
 # regardless of where the server is located
@@ -86,16 +87,37 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# ─── HEADERS (mimic a real browser) ─────────────────────────────────────────
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/122.0.0.0 Safari/537.36"
-    ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-}
+# ─── PLAYWRIGHT BROWSER INSTANCE ────────────────────────────────────────────
+# We reuse a single browser instance across all city checks for speed
+_playwright = None
+_browser = None
+
+
+def get_browser():
+    """Get or create a shared Playwright browser instance."""
+    global _playwright, _browser
+    if _browser is None:
+        _playwright = sync_playwright().start()
+        _browser = _playwright.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+            ],
+        )
+        log.info("Browser launched (Playwright Chromium)")
+    return _browser
+
+
+def close_browser():
+    """Clean up the browser instance."""
+    global _playwright, _browser
+    if _browser:
+        _browser.close()
+        _browser = None
+    if _playwright:
+        _playwright.stop()
+        _playwright = None
 
 
 def load_state():
@@ -126,15 +148,34 @@ def save_state(state):
 
 
 def fetch_city_page(city_name, city_code):
-    """Fetch and parse the VisaGrader page for a specific city."""
+    """Fetch the VisaGrader page using a real headless browser."""
     url = f"{BASE_URL}/{city_code}"
     log.info(f"Checking {city_name}: {url}")
 
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=30)
-        resp.raise_for_status()
-        return resp.text
-    except requests.RequestException as e:
+        browser = get_browser()
+        context = browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/122.0.0.0 Safari/537.36"
+            ),
+            viewport={"width": 1280, "height": 800},
+            locale="en-US",
+        )
+        page = context.new_page()
+
+        # Navigate and wait for content to load
+        page.goto(url, wait_until="networkidle", timeout=60000)
+        # Extra wait for any JS-rendered content
+        time.sleep(3)
+
+        html = page.content()
+        context.close()
+
+        log.info(f"  Fetched {city_name} successfully ({len(html)} bytes)")
+        return html
+    except Exception as e:
         log.error(f"Failed to fetch {city_name}: {e}")
         return None
 
@@ -644,13 +685,12 @@ def check_main_page():
     log.info("Checking main India overview page...")
     url = BASE_URL
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=30)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
+        html = fetch_city_page("India Overview", "")
+        if not html:
+            return []
 
-        # Extract any summary table or text
+        soup = BeautifulSoup(html, "html.parser")
         text = soup.get_text(separator="\n", strip=True)
-        # Look for lines mentioning cities
         relevant = []
         for line in text.split("\n"):
             line_lower = line.lower()
@@ -673,18 +713,23 @@ if __name__ == "__main__":
     log.info(f"Watching visa types: {[k for k, v in CONFIG['watch_visa_types'].items() if v]}")
     log.info("")
 
-    # Check main overview page first
-    check_main_page()
-    log.info("")
+    try:
+        # Check main overview page first
+        check_main_page()
+        log.info("")
 
-    # Check each city
-    result = check_all_cities()
+        # Check each city
+        result = check_all_cities()
 
-    print(f"\n{'─' * 40}")
-    print(f"Results: {result['available']} available slot(s) found")
-    print(f"New notifications sent: {result['new_notifications']}")
-    if result['slots']:
-        print("\nAvailable slots:")
-        for s in result['slots']:
-            print(f"  • {s['city']} — {s['visa_type']}: {s['raw_text'][:80]}")
-    print(f"{'─' * 40}")
+        print(f"\n{'─' * 40}")
+        print(f"Results: {result['available']} available slot(s) found")
+        print(f"New notifications sent: {result['new_notifications']}")
+        if result['slots']:
+            print("\nAvailable slots:")
+            for s in result['slots']:
+                print(f"  • {s['city']} — {s['visa_type']}: {s['raw_text'][:80]}")
+        print(f"{'─' * 40}")
+    finally:
+        # Always clean up the browser
+        close_browser()
+        log.info("Browser closed.")

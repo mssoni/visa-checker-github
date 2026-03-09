@@ -165,10 +165,16 @@ def fetch_city_page(city_name, city_code):
         )
         page = context.new_page()
 
-        # Navigate and wait for content to load
-        page.goto(url, wait_until="networkidle", timeout=60000)
-        # Extra wait for any JS-rendered content
-        time.sleep(3)
+        # Navigate — use domcontentloaded (not networkidle, which hangs
+        # on sites with analytics/websockets that never stop)
+        page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        # Wait for JS-rendered content to appear
+        time.sleep(5)
+        # Try to wait for actual content selectors
+        try:
+            page.wait_for_selector("table, .appointment, .slot, main, article", timeout=10000)
+        except Exception:
+            pass  # Continue anyway — content may use different selectors
 
         html = page.content()
         context.close()

@@ -1,0 +1,76 @@
+name: US Visa Appointment Checker
+
+on:
+  # Runs every 15 minutes
+  schedule:
+    - cron: '*/15 * * * *'
+
+  # Allows you to manually trigger from the Actions tab
+  workflow_dispatch:
+
+# Need write permission to deploy to GitHub Pages
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Only allow one run at a time
+concurrency:
+  group: visa-checker
+  cancel-in-progress: false
+
+jobs:
+  check-visa-slots:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # Restore the state file from previous runs so we don't
+      # re-notify for slots we've already seen, and weekly stats persist
+      - name: Restore state
+        uses: actions/cache/restore@v4
+        with:
+          path: visa_checker_state.json
+          key: visa-checker-state-${{ github.run_id }}
+          restore-keys: |
+            visa-checker-state-
+
+      - name: Run visa checker
+        env:
+          SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
+          SENDER_PASSWORD: ${{ secrets.SENDER_PASSWORD }}
+          RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
+          SMTP_SERVER: ${{ secrets.SMTP_SERVER || 'smtp.gmail.com' }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT || '587' }}
+        run: python visa_checker.py
+
+      # Generate status dashboard + clean up logs older than 2 weeks
+      - name: Generate status page
+        run: python status_page.py
+
+      # Save state for next run
+      - name: Save state
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: visa_checker_state.json
+          key: visa-checker-state-${{ github.run_id }}
+
+      # Deploy status page to GitHub Pages
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: status-page
+
+      - name: Deploy to GitHub Pages
+        uses: actions/deploy-pages@v4

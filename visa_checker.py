@@ -254,15 +254,23 @@ def parse_appointments(html, city_name):
                     if entry not in results:
                         results.append(entry)
 
-    # Pattern 3: Look for any "Available" or date badges/indicators
-    for elem in soup.find_all(class_=re.compile(r'available|slot|appointment|date|badge', re.I)):
+    # Pattern 3: Look for elements with availability-related CSS classes
+    # but ONLY count them if they contain an actual date and a visa type reference
+    noise_words = {"beta", "new", "old", "info", "details", "view", "click", "page",
+                   "home", "about", "contact", "login", "sign", "register", "cookie"}
+    for elem in soup.find_all(class_=re.compile(r'available|slot|appointment', re.I)):
         text = elem.get_text(strip=True)
-        if text and "not" not in text.lower():
+        if (text
+            and len(text) > 5
+            and "not" not in text.lower()
+            and text.lower().strip() not in noise_words
+            and re.search(date_pattern, text, re.I)
+            and re.search(visa_pattern, text, re.I)):
             results.append({
                 "city": city_name,
                 "visa_type": "UNKNOWN",
                 "raw_text": text[:200],
-                "has_date": bool(re.search(date_pattern, text, re.I)),
+                "has_date": True,
                 "available": True,
                 "source": "css_class_match",
             })
